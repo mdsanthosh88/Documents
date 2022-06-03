@@ -1,0 +1,1078 @@
+USE [MA2Data]
+GO
+
+/****** Object:  StoredProcedure [dbo].[proc_GetLEDLevelFourData]    Script Date: 5/24/2022 10:11:43 AM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE  PROCEDURE [dbo].[proc_GetLEDLevelFourData]
+@TIVQuartilesFilter dbo.IDsList READONLY,
+@NLEQuartilesFilter dbo.IDsList READONLY,
+@PMLQuartileFilter dbo.IDsList READONLY,
+@MPLQuartileFilter dbo.IDsList READONLY,
+@PerilType dbo.IDsList READONLY,
+@LpAcctKey int,
+@UseLocationNo BIT=1,
+@StartRowIndex INT = 1,
+@PageSize INT = 999999,
+@SortExpression VARCHAR(100) = NULL,
+@SortDirection VARCHAR(100) = 'ASC',
+@TotalRows INT OUTPUT,
+@AccountID INT=100,
+@LocationIDsList dbo.IDsList READONLY,
+@AccountProfileRatingTypeID  INT = 1
+		
+AS
+BEGIN
+	SET NOCOUNT ON;
+
+		-- store ALL the (unpaged) results in memory
+	DECLARE @Matches TABLE 
+	(
+		RowNumber INT PRIMARY KEY,
+		ID INT,		
+		LocationNo NVARCHAR(10),
+		LocationCode NVARCHAR(10),
+		CustomerLocationID NVARCHAR(75),
+		LocationName NVARCHAR(75),
+        Division NVARCHAR(75),
+		SubDivision NVARCHAR(75),
+		StreetAddress1 VARCHAR(45),
+		StreetAddress2 VARCHAR(45),
+        City NVARCHAR (75) NOT NULL,
+        [State] NVARCHAR (75),
+        Country NVARCHAR (75) NOT NULL,
+		Valueasof DATETIME,
+		ValueSource VARCHAR(50),
+		Building BIGINT,
+		MachinaryandEquipment BIGINT,
+		Stock BIGINT,
+		Other BIGINT,
+		TotalProperty BIGINT,
+		BusinessInterruptionValue BIGINT, 
+		TotalInsurableValue BIGINT,
+		LastSurveyDate DATETIME,
+		PDValue_AtLastSurvey BIGINT,
+		BIValue_AtLastSurvey BIGINT,
+		LocationValue_AtLastSurvey BIGINT,
+		SumsInsuredUpdatedAfterLastSurvey BIT,
+		Peril NVARCHAR(75),
+		NLE_PD DECIMAL(15,2),
+		NLE_PDAmount DECIMAL(30,2),
+		NLE_BI DECIMAL(15,2),
+		NLE_BIAmount DECIMAL(15,2),
+		NLE_IBI DECIMAL(30,2),
+		NLE_BITotal DECIMAL(30,2),
+		NLETotal DECIMAL(30,2),
+		NLEofTIV DECIMAL(30,2),		
+		NLEScenarioDescription NVARCHAR(4000),
+		PMLPdPercentage  DECIMAL(15,2),
+		PMLPdValue  DECIMAL(30,2),
+		PMLBiPercentage DECIMAL(15,2),
+		PMLBiValue  DECIMAL(15,2),
+		PML_IBI DECIMAL(30,2),
+		PML_BITotal DECIMAL(30,2),
+		PMLTotal DECIMAL(30,2),
+		PMLofTIV DECIMAL(30,2),
+		PMLDescription  NVARCHAR(4000),
+		MPLPdPercentage DECIMAL(15,2),
+		MPLPdValue DECIMAL(30,2),
+		MPLBiPercentage DECIMAL(15,2),
+		MPLBiValue DECIMAL(15,2),
+		MPL_IBI DECIMAL(30,2),
+		MPL_BITotal DECIMAL(30,2),
+		MPLTotal DECIMAL(30,2),
+		MPLofTIV DECIMAL(15,2),
+		MPLDescription NVARCHAR(4000),
+		MyComments1 VARCHAR(50),
+		MyComments2 VARCHAR(50),
+		MyComments3 VARCHAR(50),
+		SharedComments VARCHAR(50),
+		LossEstimatesAlignedToCurrentValues BIT
+	)
+	
+	-------- Pseudo constants
+
+	DECLARE @PerilType_ALL AS INT = -1
+	DECLARE @PerilType_Fire AS INT = 1
+	DECLARE @PerilType_BM AS INT =2
+	DECLARE @PerilType_Flood AS INT = 3
+	DECLARE @PerilType_Earthquake AS INT = 4
+	DECLARE @PerilType_Windstorm AS INT = 5
+	DECLARE @PerilType_Other AS INT = 6
+	
+    DECLARE @TivFiter_All AS INT = 0
+	DECLARE @TivFiter_Top0to25 AS INT = 1
+	DECLARE @TivFiter_Top26to50 AS INT = 2
+	DECLARE @TivFiter_Top51to75 AS INT = 3
+	DECLARE @TivFiter_Top76to100 AS INT = 4
+
+	DECLARE @NleFiter_All AS INT = 0
+	DECLARE @NleFiter_Top0to25 AS INT = 1
+	DECLARE @NleFiter_Top26to50 AS INT = 2
+	DECLARE @NleFiter_Top51to75 AS INT = 3
+	DECLARE @NleFiter_Top76to100 AS INT = 4
+	DECLARE @NleFiter_Highest10 AS INT = 5
+
+	DECLARE @PmlFiter_All AS INT = 0
+	DECLARE @PmlFiter_Top0to25 AS INT = 1
+	DECLARE @PmlFiter_Top26to50 AS INT = 2
+	DECLARE @PmlFiter_Top51to75 AS INT = 3
+	DECLARE @PmlFiter_Top76to100 AS INT = 4
+	DECLARE @PmlFiter_Highest10 AS INT = 5
+
+	DECLARE @MplFiter_All AS INT = 0
+	DECLARE @MplFiter_Top0to25 AS INT = 1
+	DECLARE @MplFiter_Top26to50 AS INT = 2
+	DECLARE @MplFiter_Top51to75 AS INT = 3
+	DECLARE @MplFiter_Top76to100 AS INT = 4
+	DECLARE @MplFiter_Highest10 AS INT = 5;
+
+	
+	CREATE TABLE #PermittedLocationsOrderedByTIV
+	(
+		[LPAllPiKey] INT, 
+		[ID] INT, 
+		[TIV] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #PermittedLocationsOrderedByTIV
+		SELECT 	
+		l.LPAllPiKey,
+		lle.ID,
+		l.PDValue + l.BIValue as [TIV],
+		ROW_NUMBER() OVER ( ORDER BY l.PDValue + l.BIValue DESC) AS [Rank] 	
+		--Bug 321612: [SiteForward] Remediate unqualified joins from stored procedure (dbo.proc_GetLEDLevelFoudData)
+		FROM dbo.[LocationLossEstimate] lle(nolock) 
+		INNER JOIN dbo.[Location] l (nolock)
+		ON lle.LocationID = L.ID 
+		AND l.LpAcctKey = @LpAcctKey 	
+		AND l.LpAllPiKey IN ( SELECT lid.ID FROM @LocationIDsList lid )
+		AND
+		  ( (@PerilType_Fire IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Fire)
+			 OR
+			 (@PerilType_BM IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_BM)
+			 OR 
+			 (@PerilType_Earthquake IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Earthquake)
+			 OR
+			 (@PerilType_Windstorm IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Windstorm)
+			 OR 
+			 (@PerilType_Flood IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Flood)
+			 OR
+			(@PerilType_Other IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Other)
+			 OR 
+			 @PerilType_ALL IN (SELECT ID FROM @PerilType) 
+			 )
+
+	CREATE TABLE #Top0To25Tiv
+	(
+		[LPAllPiKey] INT, 
+		[ID] INT,
+		[TIV] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #Top0To25Tiv
+		SELECT
+		l.LPAllPiKey,
+		l.[ID],
+		l.TIV,
+		l.[Rank]
+		FROM #PermittedLocationsOrderedByTIV l
+		WHERE l.[Rank] >= 1 AND l.[Rank] <= ( (SELECT COUNT(*) FROM #PermittedLocationsOrderedByTIV) / 4) -- i.e. Row 1 to 25
+
+	CREATE TABLE #Top26To50Tiv
+	(
+		[LPAllPiKey] INT, 
+		[ID] INT,
+		[TIV] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #Top26To50Tiv
+		SELECT
+		l.LPAllPiKey,
+		l.[ID],
+		l.TIV,
+		l.[Rank]
+		FROM #PermittedLocationsOrderedByTIV l
+		WHERE l.[Rank] > ( (SELECT COUNT(*) FROM #PermittedLocationsOrderedByTIV) / 4) AND l.[Rank] <= ( (SELECT COUNT(*) FROM #PermittedLocationsOrderedByTIV) / 2) -- i.e. Row 26 to 50
+
+	CREATE TABLE #Top51To75Tiv
+	(
+		[LPAllPiKey] INT, 
+		[ID] INT, 
+		[TIV] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #Top51To75Tiv
+		SELECT
+		l.LPAllPiKey,
+		l.[ID],
+		l.TIV,
+		l.[Rank]
+		FROM #PermittedLocationsOrderedByTIV l
+		WHERE l.[Rank] > ( (SELECT COUNT(*) FROM #PermittedLocationsOrderedByTIV) /2) AND l.[Rank] <= ( ((SELECT COUNT(*) FROM #PermittedLocationsOrderedByTIV) / 4) * 3) -- i.e. Row 51 to 75
+
+	CREATE TABLE #Top76To100Tiv
+	(
+		[LPAllPiKey] INT, 
+		[ID] INT, 
+		[TIV] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #Top76To100Tiv
+		SELECT
+		l.LPAllPiKey,
+		l.[ID],
+		l.TIV,
+		l.[Rank]
+		FROM #PermittedLocationsOrderedByTIV l
+		WHERE 
+		l.LPAllPiKey NOT IN (SELECT [ID] FROM #Top0To25Tiv)
+		AND
+		l.LPAllPiKey NOT IN (SELECT [ID] FROM #Top26To50Tiv)
+		AND
+		l.LPAllPiKey NOT IN (SELECT [ID] FROM #Top51To75Tiv)
+
+	CREATE TABLE #PermittedLocationsOrderedByNLE
+	(
+		[ID] INT, 
+		[NLE] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #PermittedLocationsOrderedByNLE
+		SELECT 	
+		lle.ID,
+		lle.NLE_Total  as [NLE],
+		ROW_NUMBER() OVER ( ORDER BY lle.NLE_total DESC) AS [Rank] 	
+		FROM dbo.[LocationLossEstimate] lle (nolock)
+		--Bug 321612: [SiteForward] Remediate unqualified joins from stored procedure (dbo.proc_GetLEDLevelFoudData)
+		INNER JOIN dbo.[Location] l(nolock) on lle.LocationID=l.ID 
+		AND l.LpAcctKey = @LpAcctKey 
+		AND l.LpAllPiKey IN ( SELECT lid.ID FROM @LocationIDsList lid )
+		AND
+		  ( (@PerilType_Fire IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Fire)
+			 OR
+			 (@PerilType_BM IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_BM)
+			 OR 
+			 (@PerilType_Earthquake IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Earthquake)
+			 OR
+			 (@PerilType_Windstorm IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Windstorm)
+			 OR 
+			 (@PerilType_Flood IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Flood)
+			 OR
+			(@PerilType_Other IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Other)
+			 OR 
+			 @PerilType_ALL IN (SELECT ID FROM @PerilType) 
+			 )
+
+	CREATE TABLE #Highest10NLE
+	(
+		[ID] INT, 
+		[NLE] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #Highest10NLE
+			SELECT TOP 10
+			l.ID,
+			l.[NLE],
+			l.[Rank]
+			FROM #PermittedLocationsOrderedByNLE l
+			order by NLE desc
+
+	CREATE TABLE #Top0To25NLE
+	(
+		[ID] INT, 
+		[NLE] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #Top0To25NLE
+			SELECT
+			l.ID,
+			l.[NLE],
+			l.[Rank]
+			FROM #PermittedLocationsOrderedByNLE l
+			WHERE l.[Rank] >= 1 AND l.[Rank] <= ( (SELECT COUNT(*) FROM #PermittedLocationsOrderedByNLE) / 4) -- i.e. Row 1 to 25
+
+
+	CREATE TABLE #Top26To50NLE
+	(
+		[ID] INT, 
+		[NLE] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #Top26To50NLE
+		SELECT
+		l.[ID],
+		l.[NLE],
+		l.[Rank]
+		FROM #PermittedLocationsOrderedByNLE l
+		WHERE l.[Rank] > ( (SELECT COUNT(*) FROM #PermittedLocationsOrderedByNLE) / 4) AND l.[Rank] <= ( (SELECT COUNT(*) FROM #PermittedLocationsOrderedByNLE) / 2) -- i.e. Row 26 to 50
+
+	CREATE TABLE #Top51To75NLE
+	(
+		[ID] INT, 
+		[NLE] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #Top51To75NLE
+		SELECT
+		l.[ID],
+		l.[NLE],
+		l.[Rank]
+		FROM #PermittedLocationsOrderedByNLE l
+		WHERE l.[Rank] > ( (SELECT COUNT(*) FROM #PermittedLocationsOrderedByNLE) /2) AND l.[Rank] <= ( ((SELECT COUNT(*) FROM #PermittedLocationsOrderedByNLE) / 4) * 3) -- i.e. Row 51 to 75
+
+	CREATE TABLE #Top76To100NLE
+	(
+		[ID] INT, 
+		[NLE] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #Top76To100NLE
+		SELECT
+		l.[ID],
+		l.NLE,
+		l.[Rank]
+		FROM #PermittedLocationsOrderedByNLE l
+		WHERE 
+		l.[ID] NOT IN (SELECT [ID] FROM #Top0To25NLE)
+		AND
+		l.[ID] NOT IN (SELECT [ID] FROM #Top26To50NLE)
+		AND
+		l.[ID] NOT IN (SELECT [ID] FROM #Top51To75NLE)
+
+
+	CREATE TABLE #PermittedLocationsOrderedByPML
+	(
+		[ID] INT, 
+		[PML] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #PermittedLocationsOrderedByPML
+		SELECT 	
+		lle.[ID],
+		lle.PML_Total  as [PML],
+		ROW_NUMBER() OVER ( ORDER BY lle.PML_total DESC) AS [Rank] 	
+		FROM dbo.[LocationLossEstimate] lle (nolock)
+		INNER JOIN [Location] (nolock)l ON lle.LocationID = l.ID
+		--	Bug 321612: [SiteForward] Remediate unqualified joins from stored procedure (dbo.proc_GetLEDLevelFoudData)	
+		AND l.LpAcctKey = @LpAcctKey 
+		AND l.LpAllPiKey IN ( SELECT lid.ID FROM @LocationIDsList lid )
+		AND
+		( (@PerilType_Fire IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Fire)
+		 OR
+		 (@PerilType_BM IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_BM)
+		 OR 
+		 (@PerilType_Earthquake IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Earthquake)
+		 OR
+		 (@PerilType_Windstorm IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Windstorm)
+		 OR 
+		 (@PerilType_Flood IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Flood)
+		 OR
+		(@PerilType_Other IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Other)
+		 OR 
+		 @PerilType_ALL IN (SELECT ID FROM @PerilType) 
+		 )
+
+	CREATE TABLE #Highest10PML
+	(
+		[ID] INT, 
+		[PML] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #Highest10PML
+		SELECT TOP 10
+		l.ID,
+		l.[PML],
+		l.[Rank]
+		FROM #PermittedLocationsOrderedByPML l
+		order by PML desc
+
+	CREATE TABLE #Top0To25PML
+	(
+		[ID] INT, 
+		[PML] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #Top0To25PML
+		SELECT
+		l.[ID],
+		l.[PML],
+		l.[Rank]
+		FROM #PermittedLocationsOrderedByPML l
+		WHERE l.[Rank] >= 1 AND l.[Rank] <= ( (SELECT COUNT(*) FROM #PermittedLocationsOrderedByPML) / 4) -- i.e. Row 1 to 25
+
+	CREATE TABLE #Top26To50PML
+	(
+		[ID] INT, 
+		[PML] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #Top26To50PML
+		SELECT
+		l.[ID],
+		l.[PML],
+		l.[Rank]
+		FROM #PermittedLocationsOrderedByPML l
+		WHERE l.[Rank] > ( (SELECT COUNT(*) FROM #PermittedLocationsOrderedByPML) / 4) AND l.[Rank] <= ( (SELECT COUNT(*) FROM #PermittedLocationsOrderedByPML) / 2) -- i.e. Row 26 to 50
+
+
+	CREATE TABLE #Top51To75PML
+	(
+		[ID] INT, 
+		[PML] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #Top51To75PML
+		SELECT
+		l.[ID],
+		l.[PML],
+		l.[Rank]
+		FROM #PermittedLocationsOrderedByPML l
+		WHERE l.[Rank] > ( (SELECT COUNT(*) FROM #PermittedLocationsOrderedByPML) /2) AND l.[Rank] <= ( ((SELECT COUNT(*) FROM #PermittedLocationsOrderedByPML) / 4) * 3) -- i.e. Row 51 to 75
+
+	CREATE TABLE #Top76To100PML
+	(
+		[ID] INT, 
+		[PML] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #Top76To100PML
+		SELECT
+		l.[ID],
+		l.PML,
+		l.[Rank]
+		FROM #PermittedLocationsOrderedByPML l
+		WHERE 
+		l.[ID] NOT IN (SELECT [ID] FROM #Top0To25PML)
+		AND
+		l.[ID] NOT IN (SELECT [ID] FROM #Top26To50PML)
+		AND
+		l.[ID] NOT IN (SELECT [ID] FROM #Top51To75PML)
+
+
+	CREATE TABLE #PermittedLocationsOrderedByMPL
+	(
+		[ID] INT, 
+		[MPL] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #PermittedLocationsOrderedByMPL
+		SELECT 	
+		lle.[ID],
+		lle.MFL_Total  as [MPL],
+		ROW_NUMBER() OVER ( ORDER BY lle.MFL_total DESC) AS [Rank] 	
+		FROM dbo.[LocationLossEstimate] lle, dbo.[Location] l
+		WHERE 	lle.LocationID=l.ID  AND l.LpAcctKey = @LpAcctKey 
+		AND l.LpAllPiKey IN ( SELECT lid.ID FROM @LocationIDsList lid )
+		AND
+		  ( (@PerilType_Fire IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Fire)
+			 OR
+			 (@PerilType_BM IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_BM)
+			 OR 
+			 (@PerilType_Earthquake IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Earthquake)
+			 OR
+			 (@PerilType_Windstorm IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Windstorm)
+			 OR 
+			 (@PerilType_Flood IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Flood)
+			 OR
+			(@PerilType_Other IN (SELECT ID FROM @PerilType) AND lle.LossTypeID=@PerilType_Other)
+			 OR 
+			 @PerilType_ALL IN (SELECT ID FROM @PerilType) 
+			 )
+
+
+	CREATE TABLE #Highest10MPL
+	(
+		[ID] INT, 
+		[MPL] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #Highest10MPL
+		SELECT TOP 10
+		l.ID,
+		l.[MPL],
+		l.[Rank]
+		FROM #PermittedLocationsOrderedByMPL l
+		order by MPL desc
+
+	CREATE TABLE #Top0To25MPL
+	(
+		[ID] INT, 
+		[MPL] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #Top0To25MPL
+			SELECT
+			l.[ID],
+			l.[MPL],
+			l.[Rank]
+			FROM #PermittedLocationsOrderedByMPL l
+			WHERE l.[Rank] >= 1 AND l.[Rank] <= ( (SELECT COUNT(*) FROM #PermittedLocationsOrderedByMPL) / 4) -- i.e. Row 1 to 25
+
+	CREATE TABLE #Top26To50MPL
+	(
+		[ID] INT, 
+		[MPL] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #Top26To50MPL
+		SELECT
+		l.[ID],
+		l.[MPL],
+		l.[Rank]
+		FROM #PermittedLocationsOrderedByMPL l
+		WHERE l.[Rank] > ( (SELECT COUNT(*) FROM #PermittedLocationsOrderedByMPL) / 4) AND l.[Rank] <= ( (SELECT COUNT(*) FROM #PermittedLocationsOrderedByMPL) / 2) -- i.e. Row 26 to 50
+
+	CREATE TABLE #Top51To75MPL
+	(
+		[ID] INT, 
+		[MPL] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #Top51To75MPL
+		SELECT
+		l.[ID],
+		l.[MPL],
+		l.[Rank]
+		FROM #PermittedLocationsOrderedByMPL l
+		WHERE l.[Rank] > ( (SELECT COUNT(*) FROM #PermittedLocationsOrderedByMPL) /2) AND l.[Rank] <= ( ((SELECT COUNT(*) FROM #PermittedLocationsOrderedByMPL) / 4) * 3) -- i.e. Row 51 to 75
+
+	CREATE TABLE #Top76To100MPL
+	(
+		[ID] INT, 
+		[MPL] DECIMAL(30,2),
+		[Rank] INT
+	) 
+	INSERT INTO #Top76To100MPL
+		SELECT
+		l.[ID],
+		l.MPL,
+		l.[Rank]
+		FROM #PermittedLocationsOrderedByMPL l
+		WHERE 
+		l.[ID] NOT IN (SELECT [ID] FROM #Top0To25MPL)
+		AND
+		l.[ID] NOT IN (SELECT [ID] FROM #Top26To50MPL)
+		AND
+		l.[ID] NOT IN (SELECT [ID] FROM #Top51To75MPL)
+
+
+
+		INSERT INTO @Matches
+		SELECT
+			RowNumber = ROW_NUMBER() OVER 
+			( 
+				ORDER BY				
+				CASE @SortExpression																                        
+				WHEN 'LocationID' THEN 
+					CASE @UseLocationNo
+					WHEN 1                                                  THEN CONVERT(SQL_VARIANT,[LocationNo])
+					WHEN 0                                                  THEN CONVERT(SQL_VARIANT,[LocationCode])
+				END		
+				WHEN  'CustomerLocationID'  THEN CONVERT(SQL_VARIANT,[ClientLocationNo])
+				WHEN  'LocationName'  THEN CONVERT(SQL_VARIANT,[LocationName])
+				WHEN  'Division'  THEN CONVERT(SQL_VARIANT,DivisionName)
+				WHEN  'SubDivision'  THEN CONVERT(SQL_VARIANT,SubDivisionName)
+				WHEN  'StreetAddress1'  THEN CONVERT(SQL_VARIANT,[AddressLine1])
+				WHEN  'StreetAddress2' THEN CONVERT(SQL_VARIANT,[AddressLine2])
+				WHEN  'City'  THEN CONVERT(SQL_VARIANT,[City])
+				WHEN  'State'  THEN CONVERT(SQL_VARIANT,[State])
+				WHEN  'Country'  THEN CONVERT(SQL_VARIANT,[Country])
+				WHEN  'Valueasof' THEN CONVERT(SQL_VARIANT,ValueAsof)
+				WHEN  'ValueSource'  THEN CONVERT(SQL_VARIANT,[ValueSource])
+				WHEN  'Building'  THEN CONVERT(SQL_VARIANT,[Building])
+				WHEN  'MachinaryandEquipment'  THEN CONVERT(SQL_VARIANT,[MachinaryandEquipment])
+				WHEN  'Stock'  THEN CONVERT(SQL_VARIANT,[Stock])
+				WHEN  'Other'  THEN CONVERT(SQL_VARIANT,[Others])
+				WHEN  'TotalProperty'  THEN CONVERT(SQL_VARIANT,[Total Property])
+				WHEN  'BusinessInterruptionValue'   THEN CONVERT(SQL_VARIANT,[BusinessInterruptionValue])
+				WHEN  'TotalInsurableValue'  THEN CONVERT(SQL_VARIANT,[Total Insurable Value])
+				WHEN  'LastSurveyDate'  THEN CONVERT(SQL_VARIANT,[LastSurveyDate])
+				WHEN  'PDValue_AtLastSurvey'  THEN CONVERT(SQL_VARIANT,[PDValue_AtLastSurvey])
+				WHEN  'BIValue_AtLastSurvey'  THEN CONVERT(SQL_VARIANT,[BIValue_AtLastSurvey])
+				WHEN  'LocationValue_AtLastSurvey'  THEN CONVERT(SQL_VARIANT,[LocationValue_AtLastSurvey])
+				WHEN  'LocationValue_UsedAtLastSurvey'  THEN CONVERT(SQL_VARIANT,[LossEstimatesAlignedToCurrentValues])
+				WHEN  'Peril'  THEN CONVERT(SQL_VARIANT,[Peril])
+				WHEN  'NLEPdPercentage' THEN CONVERT(SQL_VARIANT,NLE_PDPercentage)
+				WHEN  'NLEPdValue' THEN CONVERT(SQL_VARIANT,NLE_PDValue)
+				WHEN  'NLEBiPercentage' THEN CONVERT(SQL_VARIANT,NLE_BIPercentage)
+				WHEN  'NLEBiValue' THEN CONVERT(SQL_VARIANT,NLE_BIValue)
+				WHEN  'NleIbi' THEN CONVERT(SQL_VARIANT,NLE_IBI)
+				WHEN  'NleBiTotal' THEN CONVERT(SQL_VARIANT,NLE_BITotal)			
+				WHEN  'NLETotal' THEN CONVERT(SQL_VARIANT,NLE_Total)
+				WHEN  'NLEofTIV' THEN CONVERT(SQL_VARIANT,[NLE % of TIV Value])
+				WHEN  'NLEDescription'  THEN CONVERT(NVARCHAR(4000),[NLE Description])
+				WHEN  'PMLPdPercentage' THEN CONVERT(SQL_VARIANT,PML_PDPercentage)
+				WHEN  'PMLPdValue' THEN CONVERT(SQL_VARIANT,PML_PDValue)
+				WHEN  'PMLBiPercentage' THEN CONVERT(SQL_VARIANT,PML_BIPercentage)
+				WHEN  'PMLBiValue' THEN CONVERT(SQL_VARIANT,PML_BIValue)
+				WHEN  'PmlIbi' THEN CONVERT(SQL_VARIANT,PML_IBI)
+				WHEN  'PmlBiTotal' THEN CONVERT(SQL_VARIANT,PML_BITotal)
+				WHEN  'PMLTotal' THEN CONVERT(SQL_VARIANT,PML_Total)
+				WHEN  'PMLofTIV' THEN CONVERT(SQL_VARIANT,[PML % of TIV])
+				WHEN  'PMLDescription'  THEN CONVERT(NVARCHAR(4000),[PML Scenario/Description])
+				WHEN  'MPLPdPercentage' THEN CONVERT(SQL_VARIANT,MFL_PDPercentage)
+				WHEN  'MPLPdValue' THEN CONVERT(SQL_VARIANT,MFL_PDValue)
+				WHEN  'MPLBiPercentage' THEN CONVERT(SQL_VARIANT,MFL_BIPercentage)
+				WHEN  'MPLBiValue' THEN CONVERT(SQL_VARIANT,MFL_BIValue)
+				WHEN  'MflIbi' THEN CONVERT(SQL_VARIANT,MFL_IBI)
+				WHEN  'MflBiTotal' THEN CONVERT(SQL_VARIANT,MFL_BITotal)
+				WHEN  'MPLTotal' THEN CONVERT(SQL_VARIANT,MFL_Total)
+				WHEN  'MPLofTIV' THEN CONVERT(SQL_VARIANT,[MPL % of TIV])
+				WHEN  'MPLDescription'  THEN CONVERT(NVARCHAR(4000),[MPL Scenario/Description])
+				WHEN  'MyComments1'  THEN CONVERT(SQL_VARIANT,[My Comments 1])
+				WHEN  'MyComments2'  THEN CONVERT(SQL_VARIANT,[My Comments 2])
+				WHEN  'MyComments3'  THEN CONVERT(SQL_VARIANT,[My Comments 3])
+				WHEN  'SharedComments' THEN CONVERT(SQL_VARIANT,[Shared Comment 1])
+			
+				ELSE CONVERT(SQL_VARIANT,LocationNo)
+				END ASC, LocationNo ASC
+			),
+		    led.ID,
+			led.LocationNo,
+			led.LocationCode,
+			led.ClientLocationNo,
+			led.LocationName,
+			led.DivisionName,
+			led.SubDivisionName,
+			led.AddressLine1,
+			led.AddressLine2,
+			led.City,
+			led.[State],
+			led.Country,
+			led.ValueAsof,
+			led.[ValueSource],
+			led.[Building],
+			led.[MachinaryandEquipment],
+			led.[Stock],
+			led.[Others],
+			led.[Total Property],
+			led.[BusinessInterruptionValue],
+			led.[Total Insurable Value],
+			led.LastSurveyDate,
+			led.PDValue_AtLastSurvey,
+			led.BIValue_AtLastSurvey,
+			led.LocationValue_AtLastSurvey,
+			led.SumsInsuredUpdatedAfterLastSurvey,
+			led.Peril,
+			led.NLE_PDPercentage,
+			led.NLE_PDValue,
+			led.NLE_BIPercentage,
+			led.NLE_BIValue,
+			led.[NLE_IBI],
+			led.[NLE_BITotal],
+			led.NLE_Total,
+			led.[NLE % of TIV Value],
+			led.[NLE Description],
+			led.PML_PDPercentage,
+			led.PML_PDValue,
+			led.PML_BIPercentage,
+			led.PML_BIValue,
+			led.[PML_IBI],
+			led.[PML_BITotal],
+			led.PML_Total,
+			led.[PML % of TIV],
+			led.[PML Scenario/Description],
+			led.MFL_PDPercentage,
+		    led.MFL_PDValue,
+			led.MFL_BIPercentage,
+			led.MFL_BIValue,
+			led.[MFL_IBI],
+			led.[MFL_BITotal],
+			led.MFL_Total,
+			led.[MPL % of TIV],
+			led.[MPL Scenario/Description],
+		    led.[My Comments 1],
+			led.[My Comments 2],
+			led.[My Comments 3],
+			led.[Shared Comment 1],
+			led.LossEstimatesAlignedToCurrentValues
+			FROM
+			(
+				SELECT 
+					lle.ID,
+				    l.LocationNo,
+					l.LocationCode,
+				    l.[ClientLocationNo],
+					l.Name as [LocationName],
+					d.Name as DivisionName,
+					sd.Name as SubDivisionName,
+					l.AddressLine1,
+					l.AddressLine2,
+					l.City,
+					l.State,
+					l.Country,					
+					l.TIVUpdated AS 'ValueAsof',
+					vst.ID AS ValueSource,
+					l.PDBuilding AS Building,
+					l.PDMachinery AS 'MachinaryandEquipment',
+					l.PDStock AS Stock,
+					l.PDOther AS Others,
+					l.PDValue AS 'Total Property',
+					l.BIValue AS 'BusinessInterruptionValue',
+					ISNULL(L.PDValue, 0) + ISNULL(L.BIValue, 0)   AS 'Total Insurable Value',
+					--(ISNULL(ISNULL(L.PDValue_AtLastSurvey, L.PDValue), 0) + ISNULL(ISNULL(L.BIValue_AtLastSurvey, L.BIValue), 0))  AS 'Total Insurable Value',
+					l.LastSurveyDate,
+					l.PDValue_AtLastSurvey,
+					l.BIValue_AtLastSurvey,
+					l.LocationValue_AtLastSurvey,
+					l.SumsInsuredUpdatedAfterLastSurvey,
+					lt.ID AS Peril,
+					--lle.NLE_PDPercentage,
+					CASE WHEN ISNULL(ISNULL(l.PDValue_AtLastSurvey, l.PDValue), 0) = 0
+					THEN  ROUND(LLE.NLE_PDPercentage , 2, 1) 
+					ELSE  ROUND(LLE.NLE_PDValue / ISNULL(l.PDValue_AtLastSurvey, l.PDValue) * 100 , 2, 1)  END NLE_PDPercentage,
+					lle.NLE_PDValue,
+					--lle.NLE_BIPercentage,
+					CASE WHEN ISNULL(ISNULL(L.BIValue_AtLastSurvey, L.BIValue), 0) = 0
+					THEN   ROUND(LLE.NLE_BIPercentage , 2, 1) 
+					ELSE ROUND(LLE.NLE_BIValue / ISNULL(L.BIValue_AtLastSurvey, L.BIValue) * 100 , 2, 1)   END NLE_BIPercentage,
+					lle.NLE_BIValue,
+					lle.[NLE_IBI],
+					--lle.[NLE_BITotal],
+					--lle.NLE_Total,		
+					ISNULL(lle.NLE_BIValue, 0) + ISNULL(lle.NLE_IBI, 0) AS [NLE_BITotal],
+					ISNULL(lle.NLE_PDValue, 0) + ISNULL(lle.NLE_BIValue, 0)+ ISNULL(lle.NLE_IBI, 0) AS NLE_Total,	
+					--ISNULL(lle.NLE_Total, 0) + ISNULL(lle.NLE_IBI, 0) AS NLE_Total	,		
+					--lle.NLE_Percentage_of_TIV AS 'NLE % of TIV Value',	
+					CASE WHEN ISNULL(ISNULL(L.PDValue_AtLastSurvey, L.PDValue), 0) + ISNULL(ISNULL(L.BIValue_AtLastSurvey, L.BIValue), 0) = 0 THEN
+					ROUND(LLE.NLE_Percentage_of_TIV , 2, 1) ELSE 
+					ROUND((ISNULL(lle.NLE_PDValue, 0) + ISNULL(lle.NLE_BIValue, 0)+ ISNULL(lle.NLE_IBI, 0)) / (ISNULL(ISNULL(L.PDValue_AtLastSurvey, L.PDValue), 0) + ISNULL(ISNULL(L.BIValue_AtLastSurvey, L.BIValue), 0)) * 100 , 2, 1)
+					 END  AS 'NLE % of TIV Value',			
+					(CONVERT(nvarchar(4000),lle.NLE_LossScenarioSanitised) + '||' +  CONVERT(nvarchar(4000),lle.NLE_DescriptionSanitised) )AS 'NLE Description',
+					--lle.PML_PDPercentage,
+					CASE WHEN ISNULL(ISNULL(l.PDValue_AtLastSurvey, l.PDValue), 0) = 0 
+					THEN  ROUND(LLE.PML_PDPercentage , 2, 1) 
+					ELSE  ROUND(LLE.PML_PDValue / ISNULL(l.PDValue_AtLastSurvey, l.PDValue) * 100 , 2, 1)   END PML_PDPercentage,
+					lle.PML_PDValue,
+					--PML_BIPercentage,
+					CASE WHEN ISNULL(ISNULL(L.BIValue_AtLastSurvey, L.BIValue), 0) = 0 
+					THEN   ROUND(LLE.PML_BIPercentage , 2, 1)
+					ELSE  ROUND(LLE.PML_BIValue / ISNULL(L.BIValue_AtLastSurvey, L.BIValue) * 100 , 2, 1)  END PML_BIPercentage,
+					lle.PML_BIValue,
+					lle.[PML_IBI],
+					--lle.[PML_BITotal],
+					--lle.PML_Total,
+					ISNULL(lle.PML_BIValue, 0) + ISNULL(lle.PML_IBI, 0) AS [PML_BITotal],					
+					ISNULL(lle.PML_PDValue, 0) + ISNULL(LLE.PML_BIValue, 0)+ ISNULL(lle.PML_IBI, 0) AS PML_Total,	
+					--ISNULL(lle.PML_Total, 0) + ISNULL(lle.PML_IBI, 0) AS PML_Total	,	
+					--lle.PML_Percentage_of_TIV AS 'PML % of TIV',
+					CASE WHEN ISNULL(ISNULL(L.PDValue_AtLastSurvey, L.PDValue), 0) + ISNULL(ISNULL(L.BIValue_AtLastSurvey, L.BIValue), 0) = 0
+					 THEN  ROUND(LLE.PML_Percentage_of_TIV , 2, 1) ELSE
+					 ROUND((ISNULL(lle.PML_PDValue, 0) + ISNULL(LLE.PML_BIValue, 0)+ ISNULL(lle.PML_IBI, 0)) / (ISNULL(ISNULL(L.PDValue_AtLastSurvey, L.PDValue), 0) + ISNULL(ISNULL(L.BIValue_AtLastSurvey, L.BIValue), 0)) * 100,2,1) END  
+					 AS 'PML % of TIV',						
+					(CONVERT(nvarchar(4000),lle.PML_LossScenarioSanitised) + '||' +  CONVERT(nvarchar(4000),lle.PML_DescriptionSanitised) )AS 'PML Scenario/Description',
+					--lle.MFL_PDPercentage,
+					CASE WHEN ISNULL(ISNULL(l.PDValue_AtLastSurvey, l.PDValue), 0) = 0
+					THEN ROUND(LLE.MFL_PDPercentage , 2, 1)
+					ELSE ROUND(LLE.MFL_PDValue / ISNULL(l.PDValue_AtLastSurvey, l.PDValue) * 100,2,1) END MFL_PDPercentage,
+					lle.MFL_PDValue,
+					--lle.MFL_BIPercentage,
+					CASE WHEN ISNULL(ISNULL(L.BIValue_AtLastSurvey, L.BIValue), 0) = 0 
+					THEN  ROUND(LLE.MFL_BIPercentage , 2, 1)
+					ELSE   ROUND(LLE.MFL_BIValue / ISNULL(L.BIValue_AtLastSurvey, L.BIValue) * 100 , 2, 1)  END MFL_BIPercentage,
+					lle.MFL_BIValue,
+					lle.[MFL_IBI],
+					--lle.[MFL_BITotal],
+					--lle.MFL_Total,
+					ISNULL(lle.MFL_BIValue, 0) + ISNULL(lle.MFL_IBI, 0) AS [MFL_BITotal],
+					ISNULL(LLE.MFL_PDValue, 0) + ISNULL(LLE.MFL_BIValue, 0)+ ISNULL(lle.MFL_IBI, 0) AS MFL_Total,	
+					--ISNULL(lle.MFL_Total, 0) + ISNULL(lle.MFL_IBI, 0) AS MFL_Total	,
+					--lle.MPL_Percentage_of_TIV as 'MPL % of TIV',		
+					CASE WHEN ISNULL(ISNULL(L.PDValue_AtLastSurvey, L.PDValue), 0) + ISNULL(ISNULL(L.BIValue_AtLastSurvey, L.BIValue), 0) = 0 
+					THEN  ROUND(LLE.MPL_Percentage_of_TIV , 2, 1) ELSE
+					 ROUND((ISNULL(LLE.MFL_PDValue, 0) + ISNULL(LLE.MFL_BIValue, 0)+ ISNULL(lle.MFL_IBI, 0))/ (ISNULL(ISNULL(L.PDValue_AtLastSurvey, L.PDValue), 0) + ISNULL(ISNULL(L.BIValue_AtLastSurvey, L.BIValue), 0)) * 100 ,2,1)
+					END as 'MPL % of TIV',			
+					(CONVERT(nvarchar(4000),Isnull(lle.MFL_LossScenarioSanitised,'')) + '||' +  CONVERT(nvarchar(4000),Isnull(lle.MFL_DescriptionSanitised,'')) )AS 'MPL Scenario/Description',
+					NULL AS 'My Comments 1',
+					NULL AS 'My Comments 2',
+					NULL AS 'My Comments 3',
+					NULL AS 'Shared Comment 1',
+					l.LEsAlignedWithin5Percent AS LossEstimatesAlignedToCurrentValues
+				FROM
+				[dbo].[LocationLossEstimate] lle
+				INNER JOIN [Location] l on  l.ID  = lle.LocationID
+				INNER JOIN  @LocationIDsList lList on lList.ID = l.LPAllPiKey						
+				LEFT JOIN [Division] d on d.ID = l.DivisionID
+				LEFT JOIN [SubDivision] sd on sd.ID = l.SubDivisionID
+				LEFT JOIN PredominantConstructionType construction on construction.ID = l.PredominantConstructionTypeID				
+				INNER JOIN [LossType] lt ON lt.ID=lle.LossTypeID
+				LEFT JOIN ValueSourceType vst on vst.ID=l.ValueSourceTypeID	
+			
+				
+				LEFT JOIN #Top0To25Tiv tiv1 on tiv1.LPAllPiKey = l.LPAllPiKey
+				LEFT JOIN #Top26To50Tiv tiv2 on tiv2.LPAllPiKey = l.LPAllPiKey
+				LEFT JOIN #Top51To75Tiv tiv3 on tiv3.LPAllPiKey = l.LPAllPiKey
+				LEFT JOIN #Top76To100Tiv tiv4 on tiv4.LPAllPiKey = l.LPAllPiKey
+								
+				LEFT JOIN #Top0To25Nle Nle1 on Nle1.[ID] = l.[ID]
+				LEFT JOIN #Top26To50Nle Nle2 on Nle2.[ID] = l.[ID]
+				LEFT JOIN #Top51To75Nle Nle3 on Nle3.[ID] = l.[ID]
+				LEFT JOIN #Top76To100Nle Nle4 on Nle4.[ID] = l.[ID]
+								
+				LEFT JOIN #Top0To25PML Pml1 on Pml1.[ID] = l.[ID]
+				LEFT JOIN #Top26To50PML Pml2 on Pml2.[ID] = l.[ID]
+				LEFT JOIN #Top51To75PML Pml3 on Pml3.[ID] = l.[ID]
+				LEFT JOIN #Top76To100PML Pml4 on Pml4.[ID] = l.[ID]
+								
+				LEFT JOIN #Top0To25MPL Mpl1 on Mpl1.[ID] = l.[ID]
+				LEFT JOIN #Top26To50MPL Mpl2 on Mpl2.[ID] = l.[ID]
+				LEFT JOIN #Top51To75MPL Mpl3 on Mpl3.[ID] = l.[ID]
+				LEFT JOIN #Top76To100MPL Mpl4 on Mpl4.[ID] = l.[ID]
+				WHERE							
+				 l.AccountID = @AccountID 
+				And 
+				   (ISNULL(lle.NLE_Total,0.00) > 0 OR ISNULL(lle.NLE_PDvalue,0.00) > 0 OR
+                   ISNULL(lle.PML_Total,0.00) > 0 OR ISNULL(lle.PML_PDvalue,0.00) > 0 OR
+                   ISNULL(lle.MFL_Total,0.00) > 0 OR  ISNULL(lle.MFL_PDvalue,0.00) > 0 OR
+                   ISNULL(lle.NLE_LossScenarioSanitised,'')<> '' OR  ISNULL(lle.NLE_DescriptionSanitised,'')<>''  OR
+                   ISNULL(lle.PML_LossScenarioSanitised,'')<>'' OR ISNULL(lle.PML_DescriptionSanitised,'')<>'' OR
+                   ISNULL(lle.MFL_LossScenarioSanitised,'')<>''  OR ISNULL(lle.MFL_DescriptionSanitised,'')<> '' )
+				 AND
+				  ( (@PerilType_Fire IN (SELECT ID FROM @PerilType) AND lt.ID=@PerilType_Fire)
+					 OR
+					 (@PerilType_BM IN (SELECT ID FROM @PerilType) AND lt.ID=@PerilType_BM)
+					 OR 
+					 (@PerilType_Earthquake IN (SELECT ID FROM @PerilType) AND lt.ID=@PerilType_Earthquake)
+					 OR
+					 (@PerilType_Windstorm IN (SELECT ID FROM @PerilType) AND lt.ID=@PerilType_Windstorm)
+					 OR 
+					 (@PerilType_Flood IN (SELECT ID FROM @PerilType) AND lt.ID=@PerilType_Flood)
+					 OR
+					(@PerilType_Other IN (SELECT ID FROM @PerilType) AND lt.ID=@PerilType_Other)
+					 OR 
+					 @PerilType_ALL IN (SELECT ID FROM @PerilType) 
+					 )
+				 AND
+			   (l.LPAllPiKey IN (SELECT ID FROM @LocationIDsList))
+			  AND
+		--	 BEGIN Apply Location TIV filter
+	(
+		(
+				@TivFiter_Top0to25 IN (SELECT ID FROM @TIVQuartilesFilter) AND (
+																	l.LpAllPiKey in (
+																			SELECT LPAllPiKey FROM #Top0To25Tiv
+																		 ) 
+																	) 
+				)
+				OR
+				(
+				@TivFiter_Top26to50 IN (SELECT ID FROM @TIVQuartilesFilter) AND (
+																	l.LpAllPiKey in (
+																			SELECT LPAllPiKey FROM #Top26To50Tiv
+																		 ) 
+																	) 
+				)
+				OR
+				(
+				@TivFiter_Top51to75 IN (SELECT ID FROM @TIVQuartilesFilter) AND (
+																	l.LpAllPiKey in (
+																			SELECT LPAllPiKey FROM #Top51To75Tiv
+																		 ) 
+																	)
+				)
+				OR
+				(
+				@TivFiter_Top76to100 IN (SELECT ID FROM @TIVQuartilesFilter) AND (
+																	l.LpAllPiKey in (
+																			SELECT LPAllPiKey FROM #Top76To100Tiv
+																		 ) 
+																	)
+				)
+				OR (
+						@TivFiter_All IN (SELECT ID FROM @TIVQuartilesFilter) 
+				)
+	) -- END Apply Location TIV filter
+	AND
+	--	 BEGIN Apply Location NLE filter
+	(
+	            (
+		        @NleFiter_Highest10 IN (SELECT ID FROM @NLEQuartilesFilter) AND (
+																	lle.ID  in (
+																			SELECT [ID] FROM #Highest10NLE
+																		 ) 
+				) 									
+				OR	
+		        
+				@NLEFiter_Top0to25 IN (SELECT ID FROM @NLEQuartilesFilter) AND (
+																	lle.ID in (
+																			SELECT [ID] FROM #Top0To25NLE
+																		 ) 
+																	) 
+				)
+				OR
+				(
+				@NLEFiter_Top26to50 IN (SELECT ID FROM @NLEQuartilesFilter) AND (
+																	lle.ID in (
+																			SELECT [ID] FROM #Top26To50NLE
+																		 ) 
+																	) 
+				)
+				OR
+				(
+				@NLEFiter_Top51to75 IN (SELECT ID FROM @NLEQuartilesFilter) AND (
+																	lle.ID in (
+																			SELECT [ID] FROM #Top51To75NLE
+																		 ) 
+																	)
+				)
+				OR
+				(
+				@NLEFiter_Top76to100 IN (SELECT ID FROM @NLEQuartilesFilter) AND (
+																	lle.ID in (
+																			SELECT [ID] FROM #Top76To100NLE
+																		 ) 
+																	)
+				)
+				OR (
+						@NLEFiter_All IN (SELECT ID FROM @NLEQuartilesFilter) 
+				)
+	) -- END Apply Location NLE filter
+	AND
+	--	 BEGIN Apply Location PML filter
+	(
+		        (
+				 @PMLFiter_Highest10 IN (SELECT ID FROM @PMLQuartileFilter) AND (
+																	lle.ID  in (
+																			SELECT [ID] FROM #Highest10PML
+																		 ) 
+				) 									
+				OR	
+		        
+				@PMLFiter_Top0to25 IN (SELECT ID FROM @PMLQuartileFilter) AND (
+																	lle.ID in (
+																			SELECT [ID] FROM #Top0To25PML
+																		 ) 
+																	) 
+				)
+				OR
+				(
+				@PMLFiter_Top26to50 IN (SELECT ID FROM @PMLQuartileFilter) AND (
+																	lle.ID in (
+																			SELECT [ID] FROM #Top26To50PML
+																		 ) 
+																	) 
+				)
+				OR
+				(
+				@PMLFiter_Top51to75 IN (SELECT ID FROM @PMLQuartileFilter) AND (
+																	lle.ID in (
+																			SELECT [ID] FROM #Top51To75PML
+																		 ) 
+																	)
+				)
+				OR
+				(
+				@PMLFiter_Top76to100 IN (SELECT ID FROM @PMLQuartileFilter) AND (
+																	lle.ID in (
+																			SELECT [ID] FROM #Top76To100PML
+																		 ) 
+																	)
+				)
+				OR (
+						@PMLFiter_All IN (SELECT ID FROM @PMLQuartileFilter) 
+				)
+	) -- END Apply Location PML filter
+	AND
+--	 BEGIN Apply Location MPL filter
+	(
+	           (
+		        @MplFiter_Highest10 IN (SELECT ID FROM @MPLQuartileFilter) AND (
+																	lle.ID  in (
+																			SELECT [ID] FROM #Highest10MPL
+																		 ) 
+				) 									
+				OR
+		        
+				@MPLFiter_Top0to25 IN (SELECT ID FROM @MPLQuartileFilter) AND (
+																	lle.ID in (
+																			SELECT [ID] FROM #Top0To25MPL
+																		 ) 
+																	) 
+				)
+				OR
+				(
+				@MPLFiter_Top26to50 IN (SELECT ID FROM @MPLQuartileFilter) AND (
+																	lle.ID in (
+																			SELECT [ID] FROM #Top26To50MPL
+																		 ) 
+																	) 
+				)
+				OR
+				(
+				@MPLFiter_Top51to75 IN (SELECT ID FROM @MPLQuartileFilter) AND (
+																	lle.ID in (
+																			SELECT [ID] FROM #Top51To75MPL
+																		 ) 
+																	)
+				)
+				OR
+				(
+				@MPLFiter_Top76to100 IN (SELECT ID FROM @MPLQuartileFilter) AND (
+																	lle.ID in (
+																			SELECT [ID] FROM #Top76To100MPL
+																		 ) 
+																	)
+				)
+				OR (
+						@MPLFiter_All IN (SELECT ID FROM @MPLQuartileFilter) 
+				)
+				
+	) -- END Apply Location MPL filter
+	GROUP BY lle.ID, l.ID, l.LocationCode, l.LocationNo,l.[ClientLocationNo],l.Name,d.Name,sd.Name,
+					l.AddressLine1,l.AddressLine2,l.City,l.State,l.Country,
+					l.TIVUpdated,vst.ID,l.PDBuilding,l.PDMachinery,l.PDStock,l.PDOther,l.PDValue,l.BIValue,lt.ID,lle.NLE_PDPercentage,lle.NLE_PDValue,l.LEsAlignedWithin5Percent,
+					NLE_BIPercentage,NLE_BIValue,
+					lle.[NLE_IBI],
+					lle.[NLE_BITotal],
+					NLE_Total,
+					lle.NLE_LossScenarioSanitised,lle.NLE_DescriptionSanitised,
+					lle.PML_LossScenarioSanitised,lle.PML_DescriptionSanitised,
+					lle.MFL_LossScenarioSanitised,lle.MFL_DescriptionSanitised,
+					lle.PML_PDPercentage,lle.PML_PDValue,
+					lle.[PML_IBI],
+					lle.[PML_BITotal],
+					lle.PML_BIPercentage,lle.PML_BIValue,lle.PML_Total,lle.MFL_PDPercentage,lle.MFL_PDValue,
+					lle.MFL_BIPercentage,lle.MFL_BIValue,
+					lle.[MFL_IBI],
+					lle.[MFL_BITotal],
+					lle.MFL_Total,
+					l.LastSurveyDate, l.PDValue_AtLastSurvey, l.BIValue_AtLastSurvey, l.LocationValue_AtLastSurvey, l.SumsInsuredUpdatedAfterLastSurvey,
+					lle.NLE_Percentage_of_TIV, lle.PML_Percentage_of_TIV, lle.MPL_Percentage_of_TIV
+	  
+		) led
+		
+		ORDER BY led.LocationNo,led.[Total Insurable Value],led.Peril
+		
+     
+		--- get the total number of rows before paging
+		SELECT 
+		@TotalRows = COUNT(*) 
+		FROM @Matches
+
+	IF @SortDirection = 'ASC'
+	BEGIN
+		SELECT * 
+		FROM @Matches
+		WHERE
+		RowNumber > @StartRowIndex AND RowNumber <= (@StartRowIndex + (@PageSize))
+		ORDER BY RowNumber ASC
+	END
+	ELSE
+	BEGIN
+		SELECT *
+		FROM @Matches
+		WHERE 
+		RowNumber >= (@TotalRows-@StartRowIndex-@PageSize+1) AND RowNumber <= (@TotalRows-@StartRowIndex)
+		ORDER BY RowNumber DESC
+	END
+
+
+END
+GO
+
+
